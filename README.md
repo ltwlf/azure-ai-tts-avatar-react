@@ -1,4 +1,4 @@
-# Azure TTS Avatar Demo
+# Azure AI TTS Avatar React Demo
 
 This project demonstrates the integration of Azure AI Foundry with Azure OpenAI and Azure Text-to-Speech Avatar services to create an interactive virtual assistant.
 
