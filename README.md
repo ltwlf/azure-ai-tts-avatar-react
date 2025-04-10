@@ -1,18 +1,18 @@
 # Azure TTS Avatar Demo
 
-This project demonstrates the integration of Azure OpenAI with Azure Text-to-Speech Avatar services to create an interactive virtual assistant.
+This project demonstrates the integration of Azure AI Foundry with Azure OpenAI and Azure Text-to-Speech Avatar services to create an interactive virtual assistant.
 
 ## Features
 
 - Interactive avatar using Azure TTS Avatar API
-- Conversational AI powered by Azure OpenAI
+- Conversational AI powered by Azure AI Foundry
 - Voice recognition for hands-free interaction
 - Customizable system prompt
 - Modern UI using Fluent UI components
 
 ## Prerequisites
 
-- Azure OpenAI subscription with a GPT-4 or similar model deployment
+- Azure AI Foundry with Azure OpenAI resources with a GPT-4o or similar model deployment
 - Azure Speech Services subscription with Avatar support
 - Node.js (version 16 or later recommended)
 - npm (version 8 or later recommended)
