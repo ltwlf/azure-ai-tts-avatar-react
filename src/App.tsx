@@ -355,7 +355,7 @@ function App() {
       <div className={styles.root}>
         {/* Top Chrome Header */}
         <div className={styles.header}>
-          <Text size={500} weight="semibold">atwork - Azure TTS Avatar Demo</Text>
+          <Text size={500} weight="semibold">Azure TTS Avatar Demo</Text>
           
           <div className={styles.toolbar}>
             <Settings24Regular 
