@@ -12,7 +12,7 @@
     "@types/node": "^16.18.70",
     "@types/react": "^18.2.47",
     "@types/react-dom": "^18.2.18",
-    "microsoft-cognitiveservices-speech-sdk": "^1.42.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.46.0",
     "openai": "^4.86.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -50,9 +50,3 @@
     "javascript-obfuscator": "^4.1.0"
   }
 }
-// No source map
-// Obfuscate
-// Update deps
-// No source map
-// Obfuscate
-// Update deps
