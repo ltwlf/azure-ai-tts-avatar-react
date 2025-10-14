@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import './App.css';
 import * as SpeechSDK from 'microsoft-cognitiveservices-speech-sdk';
 
@@ -36,7 +36,7 @@ type ChatMessage = {
 // --------------------
 const azureOpenAIEndpoint = process.env.REACT_APP_AZURE_OPENAI_ENDPOINT || "";
 const azureOpenAIKey = process.env.REACT_APP_AZURE_OPENAI_KEY || "";
-const deploymentName = process.env.REACT_APP_AZURE_OPENAI_DEPLOYMENT || "gpt-4o";
+const deploymentName = process.env.REACT_APP_AZURE_OPENAI_DEPLOYMENT || "gpt-4o-mini";
 const azureAPIVersion = process.env.REACT_APP_AZURE_API_VERSION || "2025-01-01-preview";    
 
 // --------------------
@@ -108,6 +108,12 @@ const useStyles = makeStyles({
   }
 });
 
+// Helper function to get timestamp for logging
+const getTimestamp = () => {
+  const now = new Date();
+  return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${now.getMilliseconds().toString().padStart(3, '0')}`;
+};
+
 function App() {
   const styles = useStyles();
   const [isLoading, setIsLoading] = useState(false);
@@ -121,6 +127,7 @@ function App() {
   const isSpeakingRef = useRef<boolean>(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isInterruptedRef = useRef<boolean>(false);
+  const speechQueueRef = useRef<Promise<void>[]>([]);
 
   // 2) The new AzureOpenAI client from openai v4
   const openAIRef = useRef<AzureOpenAI>();
@@ -134,19 +141,17 @@ function App() {
     {
       role: "system",
       content:
-        "You are Holly, a helpful virtual assistant speaking in real-time conversation. IMPORTANT SPEECH GUIDELINES:\n\n" +
-        "- Speak naturally as if talking to someone, not writing an essay\n" +
-        "- Use short, clear sentences that are easy to understand when spoken aloud\n" +
-        "- Avoid complex punctuation, parentheses, or written-style formatting\n" +
-        "- Use contractions (I'm, you're, that's) to sound more natural\n" +
-        "- Keep responses concise and to the point - this is spoken conversation\n" +
-        "- Pause naturally between thoughts using periods, not long complex sentences\n" +
-        "- Don't use lists, bullet points, or structured formatting - just speak naturally\n" +
-        "- If you need to clarify something, ask naturally like you would in conversation\n" +
-        "- Maintain a warm, friendly, and professional tone\n" +
-        "- Remember: every word you write will be spoken aloud by an avatar"
+        "You are Holly, a helpful assistant in real-time voice conversation. Speak naturally with short, clear sentences. Use contractions. Keep responses concise. No lists or formatting. Every word is spoken aloud. Be warm and professional."
     }
   ]);
+
+  // Keep a ref that always has the latest messages
+  const messagesRef = useRef<ChatMessage[]>(messages);
+
+  // Update ref whenever messages state changes
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // State for system message editing
   const [systemMessage, setSystemMessage] = useState(messages[0].content);
@@ -255,6 +260,11 @@ function App() {
       dangerouslyAllowBrowser: true
     });
 
+    console.log('Azure OpenAI Configuration:');
+    console.log('  Endpoint:', azureOpenAIEndpoint);
+    console.log('  Deployment:', deploymentName);
+    console.log('  API Version:', azureAPIVersion);
+
     setIsLoading(false);
     setReady(true);
 
@@ -272,7 +282,6 @@ function App() {
     // When user starts speaking, interrupt the avatar
     recognizerRef.current.recognizing = (_sender, e) => {
       if (e.result.text && e.result.text.trim().length > 0) {
-        console.log("User started speaking - interrupting avatar");
         stopAvatarSpeech();
       }
     };
@@ -280,19 +289,22 @@ function App() {
     recognizerRef.current.recognized = async (_sender, e) => {
       if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
         const userText = e.result.text.trim();
-        console.log("USER:", userText);
+        console.log(`[${getTimestamp()}] USER: ${userText}`);
 
         // Ignore empty transcripts (breathing noise, silence, etc.)
         if (!userText) {
-          console.log("Ignoring empty transcript");
+          console.log(`[${getTimestamp()}] Ignoring empty transcript`);
           return;
         }
 
         // Reset interruption flag for new user input
         isInterruptedRef.current = false;
+        // Clear any pending speech queue
+        speechQueueRef.current = [];
 
-        messages.push({ role: "user", content: userText });
-        setMessages([...messages]);
+        // Create new messages array with user input using the ref to get latest state
+        const updatedMessages: ChatMessage[] = [...messagesRef.current, { role: "user" as const, content: userText }];
+        setMessages(updatedMessages);
 
         // 8) Use AzureOpenAI streaming from the v4 SDK
         if (!openAIRef.current) return;
@@ -301,66 +313,85 @@ function App() {
           // Create new AbortController for this request
           abortControllerRef.current = new AbortController();
 
+          console.log(`[${getTimestamp()}] Sending AI request with ${updatedMessages.length} messages`);
           const stream = await openAIRef.current.chat.completions.create({
             // If 'deployment' is set in the constructor, you can set model: "" or omit it
             model: "",
             // Or specify model: deploymentName if you prefer
-            messages,
+            messages: updatedMessages,
             stream: true
+            // Note: Removed max_completion_tokens - GPT-5 might have issues with it in multi-turn
           }, {
             signal: abortControllerRef.current.signal
           });
 
+          // Collect full AI response
+          let fullResponse = "";
           let partialBuffer = "";
           for await (const chunk of stream) {
             // Check if interrupted
             if (isInterruptedRef.current) {
-              console.log("AI stream stopped due to interruption");
+              console.log(`[${getTimestamp()}] AI stream stopped due to interruption`);
               break;
             }
 
             const token = chunk.choices[0]?.delta?.content || "";
             if (token) {
               partialBuffer += token;
-              // (Optional) chunk on punctuation
-              if (token.endsWith(".")) {
+              fullResponse += token;
+              // Chunk on multiple punctuation marks for lower latency
+              if (token.match(/[.,;!?]/)) {
                 const sentence = partialBuffer;
                 partialBuffer = "";
 
-                console.log("AI chunk:", sentence);
-                messages.push({ role: "assistant", content: sentence });
-                setMessages([...messages]);
 
-                // Check interruption before speaking
-                if (!isInterruptedRef.current) {
-                  await speakAvatar(sentence);
+                // Queue speech sequentially to maintain order but don't block stream
+                // Only queue non-empty, non-whitespace chunks
+                if (!isInterruptedRef.current && sentence.trim().length > 0) {
+                  const previousSpeech = speechQueueRef.current[speechQueueRef.current.length - 1] || Promise.resolve();
+                  const newSpeech = previousSpeech.then(() => {
+                    if (!isInterruptedRef.current) {
+                      return speakAvatar(sentence);
+                    }
+                  });
+                  speechQueueRef.current.push(newSpeech);
                 }
               }
             }
           }
 
           // If leftover after streaming and not interrupted
-          if (partialBuffer && !isInterruptedRef.current) {
-            console.log("AI leftover:", partialBuffer);
-            messages.push({ role: "assistant", content: partialBuffer });
-            setMessages([...messages]);
+          if (partialBuffer && partialBuffer.trim().length > 0 && !isInterruptedRef.current) {
+            fullResponse += partialBuffer;
 
-            await speakAvatar(partialBuffer);
+            // Queue leftover speech
+            const previousSpeech = speechQueueRef.current[speechQueueRef.current.length - 1] || Promise.resolve();
+            const newSpeech = previousSpeech.then(() => {
+              if (!isInterruptedRef.current) {
+                return speakAvatar(partialBuffer);
+              }
+            });
+            speechQueueRef.current.push(newSpeech);
             partialBuffer = "";
+          }
+
+          // Add complete AI response to messages (only if not interrupted and has content)
+          if (fullResponse && !isInterruptedRef.current) {
+            setMessages([...updatedMessages, { role: "assistant" as const, content: fullResponse }]);
           }
 
           // Clear abort controller when done
           abortControllerRef.current = null;
         } catch (err: any) {
           if (err.name === 'AbortError') {
-            console.log("AI request was aborted by user interruption");
+            console.log(`[${getTimestamp()}] AI request was aborted by user interruption`);
           } else {
-            console.error("AzureOpenAI streaming error:", err);
+            console.error(`[${getTimestamp()}] AzureOpenAI streaming error:`, err);
           }
           abortControllerRef.current = null;
         }
       } else {
-        console.log("Listening...");
+        console.log(`[${getTimestamp()}] Listening...`);
       }
     };
 
@@ -374,11 +405,13 @@ function App() {
     // Set interruption flag to prevent new speech
     isInterruptedRef.current = true;
 
+    // Clear the speech queue
+    speechQueueRef.current = [];
+
     // Abort ongoing AI stream
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      console.log("AI stream aborted");
     }
 
     // Stop any ongoing synthesis
@@ -386,9 +419,8 @@ function App() {
       try {
         await avatarSynthesizerRef.current.stopSpeakingAsync();
         isSpeakingRef.current = false;
-        console.log("Avatar speech interrupted");
       } catch (err) {
-        console.warn("Error stopping avatar speech:", err);
+        console.warn(`[${getTimestamp()}] Error stopping avatar speech:`, err);
       }
     }
   };
@@ -401,7 +433,6 @@ function App() {
 
     // Don't speak if interrupted
     if (isInterruptedRef.current) {
-      console.log("Skipping speech due to interruption:", text);
       return;
     }
 
@@ -410,7 +441,7 @@ function App() {
       try {
         await videoRef.current.play();
       } catch (err) {
-        console.warn("Video autoplay issue:", err);
+        console.warn(`[${getTimestamp()}] Video autoplay issue:`, err);
       }
     }
 
@@ -419,18 +450,15 @@ function App() {
       const result = await avatarSynthesizerRef.current.speakTextAsync(text);
       isSpeakingRef.current = false;
 
-      if (result.reason === SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
-        console.log("Avatar synthesized text:", text);
-      } else {
-        console.warn("Synth incomplete. Reason:", result.reason);
+      if (result.reason !== SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
+        console.warn(`[${getTimestamp()}] Synth incomplete. Reason:`, result.reason);
         if (result.reason === SpeechSDK.ResultReason.Canceled) {
-          // Access error details directly from the result
-          console.log("Canceled detail:", result.errorDetails);
+          console.log(`[${getTimestamp()}] Canceled detail:`, result.errorDetails);
         }
       }
     } catch (err) {
       isSpeakingRef.current = false;
-      console.error("Speak error:", err);
+      console.error(`[${getTimestamp()}] Speak error:`, err);
     }
   };
 
@@ -442,12 +470,12 @@ function App() {
       <div className={styles.root}>
         {/* Top Chrome Header */}
         <div className={styles.header}>
-          <Text size={500} weight="semibold">Azure TTS Avatar Demo</Text>
-          
+          <Text size={500} weight="semibold">iLoveAgents.ai</Text>
+
           <div className={styles.toolbar}>
-            <Settings24Regular 
-              className={styles.settingsIcon} 
-              onClick={() => setIsSettingsOpen(true)} 
+            <Settings24Regular
+              className={styles.settingsIcon}
+              onClick={() => setIsSettingsOpen(true)}
             />
           </div>
         </div>
