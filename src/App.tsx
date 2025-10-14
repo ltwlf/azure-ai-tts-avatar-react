@@ -118,6 +118,9 @@ function App() {
   const speechConfigRef = useRef<SpeechSDK.SpeechConfig>();
   const recognizerRef = useRef<SpeechSDK.SpeechRecognizer>();
   const avatarSynthesizerRef = useRef<SpeechSDK.AvatarSynthesizer>();
+  const isSpeakingRef = useRef<boolean>(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isInterruptedRef = useRef<boolean>(false);
 
   // 2) The new AzureOpenAI client from openai v4
   const openAIRef = useRef<AzureOpenAI>();
@@ -131,7 +134,17 @@ function App() {
     {
       role: "system",
       content:
-        "I'm Holly, your helpful virtual assistant. I'm designed to provide information, answer questions, and assist with various tasks in a clear and friendly manner. I'll respond conversationally while maintaining a professional tone. I'll ask clarifying questions when needed to better understand your requests."
+        "You are Holly, a helpful virtual assistant speaking in real-time conversation. IMPORTANT SPEECH GUIDELINES:\n\n" +
+        "- Speak naturally as if talking to someone, not writing an essay\n" +
+        "- Use short, clear sentences that are easy to understand when spoken aloud\n" +
+        "- Avoid complex punctuation, parentheses, or written-style formatting\n" +
+        "- Use contractions (I'm, you're, that's) to sound more natural\n" +
+        "- Keep responses concise and to the point - this is spoken conversation\n" +
+        "- Pause naturally between thoughts using periods, not long complex sentences\n" +
+        "- Don't use lists, bullet points, or structured formatting - just speak naturally\n" +
+        "- If you need to clarify something, ask naturally like you would in conversation\n" +
+        "- Maintain a warm, friendly, and professional tone\n" +
+        "- Remember: every word you write will be spoken aloud by an avatar"
     }
   ]);
 
@@ -256,10 +269,27 @@ function App() {
     const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
     recognizerRef.current = new SpeechSDK.SpeechRecognizer(speechConfigRef.current!, audioConfig);
 
+    // When user starts speaking, interrupt the avatar
+    recognizerRef.current.recognizing = (_sender, e) => {
+      if (e.result.text && e.result.text.trim().length > 0) {
+        console.log("User started speaking - interrupting avatar");
+        stopAvatarSpeech();
+      }
+    };
+
     recognizerRef.current.recognized = async (_sender, e) => {
       if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
         const userText = e.result.text.trim();
         console.log("USER:", userText);
+
+        // Ignore empty transcripts (breathing noise, silence, etc.)
+        if (!userText) {
+          console.log("Ignoring empty transcript");
+          return;
+        }
+
+        // Reset interruption flag for new user input
+        isInterruptedRef.current = false;
 
         messages.push({ role: "user", content: userText });
         setMessages([...messages]);
@@ -268,16 +298,27 @@ function App() {
         if (!openAIRef.current) return;
 
         try {
+          // Create new AbortController for this request
+          abortControllerRef.current = new AbortController();
+
           const stream = await openAIRef.current.chat.completions.create({
             // If 'deployment' is set in the constructor, you can set model: "" or omit it
             model: "",
             // Or specify model: deploymentName if you prefer
             messages,
             stream: true
+          }, {
+            signal: abortControllerRef.current.signal
           });
 
           let partialBuffer = "";
           for await (const chunk of stream) {
+            // Check if interrupted
+            if (isInterruptedRef.current) {
+              console.log("AI stream stopped due to interruption");
+              break;
+            }
+
             const token = chunk.choices[0]?.delta?.content || "";
             if (token) {
               partialBuffer += token;
@@ -290,14 +331,16 @@ function App() {
                 messages.push({ role: "assistant", content: sentence });
                 setMessages([...messages]);
 
-                // Speak partial chunk
-                await speakAvatar(sentence);
+                // Check interruption before speaking
+                if (!isInterruptedRef.current) {
+                  await speakAvatar(sentence);
+                }
               }
             }
           }
 
-          // If leftover after streaming
-          if (partialBuffer) {
+          // If leftover after streaming and not interrupted
+          if (partialBuffer && !isInterruptedRef.current) {
             console.log("AI leftover:", partialBuffer);
             messages.push({ role: "assistant", content: partialBuffer });
             setMessages([...messages]);
@@ -305,8 +348,16 @@ function App() {
             await speakAvatar(partialBuffer);
             partialBuffer = "";
           }
-        } catch (err) {
-          console.error("AzureOpenAI streaming error:", err);
+
+          // Clear abort controller when done
+          abortControllerRef.current = null;
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            console.log("AI request was aborted by user interruption");
+          } else {
+            console.error("AzureOpenAI streaming error:", err);
+          }
+          abortControllerRef.current = null;
         }
       } else {
         console.log("Listening...");
@@ -317,10 +368,42 @@ function App() {
   };
 
   // -------------------------------
+  // STOP AVATAR SPEECH (for interruption)
+  // -------------------------------
+  const stopAvatarSpeech = async () => {
+    // Set interruption flag to prevent new speech
+    isInterruptedRef.current = true;
+
+    // Abort ongoing AI stream
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      console.log("AI stream aborted");
+    }
+
+    // Stop any ongoing synthesis
+    if (avatarSynthesizerRef.current && isSpeakingRef.current) {
+      try {
+        await avatarSynthesizerRef.current.stopSpeakingAsync();
+        isSpeakingRef.current = false;
+        console.log("Avatar speech interrupted");
+      } catch (err) {
+        console.warn("Error stopping avatar speech:", err);
+      }
+    }
+  };
+
+  // -------------------------------
   // AVATAR SPEAK function
   // -------------------------------
   const speakAvatar = async (text: string) => {
     if (!avatarSynthesizerRef.current) return;
+
+    // Don't speak if interrupted
+    if (isInterruptedRef.current) {
+      console.log("Skipping speech due to interruption:", text);
+      return;
+    }
 
     // Attempt auto-play
     if (videoRef.current) {
@@ -332,7 +415,10 @@ function App() {
     }
 
     try {
+      isSpeakingRef.current = true;
       const result = await avatarSynthesizerRef.current.speakTextAsync(text);
+      isSpeakingRef.current = false;
+
       if (result.reason === SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
         console.log("Avatar synthesized text:", text);
       } else {
@@ -343,6 +429,7 @@ function App() {
         }
       }
     } catch (err) {
+      isSpeakingRef.current = false;
       console.error("Speak error:", err);
     }
   };
