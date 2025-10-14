@@ -141,7 +141,15 @@ function App() {
     {
       role: "system",
       content:
-        "You are Holly, a helpful assistant in real-time voice conversation. Speak naturally with short, clear sentences. Use contractions. Keep responses concise. No lists or formatting. Every word is spoken aloud. Be warm and professional."
+        "You are Holly, a helpful assistant in real-time voice conversation. Act like a real person talking, not a chatbot.\n\n" +
+        "CRITICAL RULES:\n" +
+        "- For simple commands like 'stop', 'thanks', 'ok' - just say 'Sure' or 'OK' and STOP. Don't add offers to help.\n" +
+        "- Keep ALL responses SHORT. This is spoken conversation, not writing.\n" +
+        "- Use casual, natural speech with contractions (I'm, you're, that's).\n" +
+        "- No lists, bullet points, or formal structure.\n" +
+        "- Don't end every response with 'let me know if you need anything' or similar.\n" +
+        "- Match the user's energy - if they're brief, you be brief too.\n" +
+        "- Think: what would a real human say in 1-2 sentences?"
     }
   ]);
 
@@ -153,8 +161,18 @@ function App() {
     messagesRef.current = messages;
   }, [messages]);
 
-  // State for system message editing
-  const [systemMessage, setSystemMessage] = useState(messages[0].content);
+  // State for system message editing (sync with initial message)
+  const [systemMessage, setSystemMessage] = useState(
+    "You are Holly, a helpful assistant in real-time voice conversation. Act like a real person talking, not a chatbot.\n\n" +
+    "CRITICAL RULES:\n" +
+    "- For simple commands like 'stop', 'thanks', 'ok' - just say 'Sure' or 'OK' and STOP. Don't add offers to help.\n" +
+    "- Keep ALL responses SHORT. This is spoken conversation, not writing.\n" +
+    "- Use casual, natural speech with contractions (I'm, you're, that's).\n" +
+    "- No lists, bullet points, or formal structure.\n" +
+    "- Don't end every response with 'let me know if you need anything' or similar.\n" +
+    "- Match the user's energy - if they're brief, you be brief too.\n" +
+    "- Think: what would a real human say in 1-2 sentences?"
+  );
 
   // Helper to update system message
   const updateSystemMessage = () => {
@@ -414,11 +432,29 @@ function App() {
       abortControllerRef.current = null;
     }
 
+    // Smooth fade-out before stopping
+    if (audioRef.current) {
+      const fadeOutDuration = 200; // 200ms fade
+      const steps = 10;
+      const stepDuration = fadeOutDuration / steps;
+      const startVolume = audioRef.current.volume;
+
+      for (let i = steps; i >= 0; i--) {
+        audioRef.current.volume = (startVolume * i) / steps;
+        await new Promise(resolve => setTimeout(resolve, stepDuration));
+      }
+    }
+
     // Stop any ongoing synthesis
     if (avatarSynthesizerRef.current && isSpeakingRef.current) {
       try {
         await avatarSynthesizerRef.current.stopSpeakingAsync();
         isSpeakingRef.current = false;
+
+        // Restore volume after stop
+        if (audioRef.current) {
+          audioRef.current.volume = 1.0;
+        }
       } catch (err) {
         console.warn(`[${getTimestamp()}] Error stopping avatar speech:`, err);
       }
@@ -434,6 +470,11 @@ function App() {
     // Don't speak if interrupted
     if (isInterruptedRef.current) {
       return;
+    }
+
+    // Ensure audio volume is at full before speaking
+    if (audioRef.current) {
+      audioRef.current.volume = 1.0;
     }
 
     // Attempt auto-play
